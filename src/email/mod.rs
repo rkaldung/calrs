@@ -209,7 +209,9 @@ pub struct BookingDetails {
     /// The guest's answers to the booking questions (#210), in form order.
     /// Shown in the host emails, the guest's confirmation and pending
     /// emails, and (`in_calendar` only) the host's calendar copy; never in
-    /// a subject, an attendee copy, the emailed .ics or an SMS. Read them
+    /// a subject, an attendee copy, the emailed .ics or an SMS, except an
+    /// answer the operator names in `CALRS_CALENDAR_TITLE`, which every
+    /// copy of the event carries in its title. Read them
     /// with `booking_guest_input` when rebuilding from the row.
     pub answers: Vec<BookingAnswer>,
 }
@@ -304,6 +306,10 @@ pub struct CancellationDetails {
     /// emails: the event type's own, else the instance default. Load it with
     /// `guest_footer`. Host emails never carry it.
     pub guest_footer: Option<String>,
+    /// The guest's answers, read only to fill the calendar title template
+    /// (`CALRS_CALENDAR_TITLE`) of the CANCEL, so it names the event like
+    /// the invite it ends. Filled by `with_invite_holders`.
+    pub answers: Vec<BookingAnswer>,
 }
 
 // --- Reschedule emails ---

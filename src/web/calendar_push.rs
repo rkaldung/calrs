@@ -1261,6 +1261,10 @@ pub(crate) async fn with_invite_holders(
     .ok()
     .flatten()
     .unwrap_or(false);
+    let details = crate::email::CancellationDetails {
+        answers: booking_guest_input(pool, &details.uid).await.answers,
+        ..details
+    };
     if !invite_sent {
         return crate::email::CancellationDetails {
             invite_sent: false,
