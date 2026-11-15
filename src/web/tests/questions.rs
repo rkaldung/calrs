@@ -725,6 +725,31 @@ async fn the_booking_form_renders_the_questions_accessibly() {
 }
 
 #[tokio::test]
+async fn the_booking_link_prefills_the_guest_and_text_answers() {
+    let (app, pool, _, et_id) = setup_test_app().await;
+    let qs = seed_questions(&pool, &et_id).await;
+    let uri = format!(
+        "{}&name=Jeanne%20Martin&email=jeanne%40example.com&notes=Hi&a_{}=T%23123%22%3E%3Cb%3E&a_nope=x&a_{}=o1",
+        booking_form_uri(None),
+        qs[0].key,
+        qs[1].key
+    );
+    let body = body_string(app.oneshot(get(&uri)).await.unwrap()).await;
+    assert!(body.contains(r#"value="Jeanne Martin""#), "{body}");
+    assert!(body.contains(r#"value="jeanne@example.com""#));
+    assert!(body.contains(">Hi</textarea>"));
+    // The text answer is filled in, escaped.
+    let field = &body[body.find(&format!(r#"name="q_{}""#, qs[0].id)).unwrap()..];
+    let field = &field[..field.find('>').unwrap()];
+    assert!(
+        field.contains(r#"value="T#123&quot;&gt;&lt;b&gt;""#),
+        "{field}"
+    );
+    // A choice question is not prefilled.
+    assert!(!body.contains("checked"));
+}
+
+#[tokio::test]
 async fn the_notes_field_follows_its_mode() {
     let (app, pool, _, et_id) = setup_test_app().await;
     save(&pool, &et_id, None, Some("off")).await.unwrap();

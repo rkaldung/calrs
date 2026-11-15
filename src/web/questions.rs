@@ -212,8 +212,66 @@ fn option_field_name(question_id: &str, option_id: &str) -> String {
     format!("q_{question_id}__{option_id}")
 }
 
+/// Values a booking link may carry to fill in the form: `name`, `email`,
+/// `notes`, and `a_<question key>` for a text question. Only a starting
+/// value: the guest can still change it, and the POST validates it like
+/// anything typed.
+#[derive(Debug, Default)]
+pub(crate) struct Prefill<'a> {
+    pub(crate) name: &'a str,
+    pub(crate) email: &'a str,
+    pub(crate) notes: &'a str,
+    answers: HashMap<&'a str, &'a str>,
+}
+
+/// Prefix of a query parameter that prefills a booking question.
+pub(crate) const PREFILL_ANSWER_PREFIX: &str = "a_";
+
+impl<'a> Prefill<'a> {
+    pub(crate) fn from_query(query: &'a HashMap<String, String>) -> Prefill<'a> {
+        let get = |key: &str| query.get(key).map(String::as_str).unwrap_or("");
+        Prefill {
+            name: get("name"),
+            email: get("email"),
+            notes: get("notes"),
+            answers: query
+                .iter()
+                .filter_map(|(k, v)| {
+                    let key = k.strip_prefix(PREFILL_ANSWER_PREFIX)?;
+                    (!key.is_empty() && key.len() <= MAX_KEY).then_some((key, v.as_str()))
+                })
+                .collect(),
+        }
+    }
+
+    /// The starting value of a text question, cleaned and cut to its limit.
+    fn answer(&self, q: &Question) -> String {
+        let max = if q.kind == Kind::LongText {
+            MAX_LONG_ANSWER
+        } else {
+            MAX_SHORT_ANSWER
+        };
+        match (q.kind, self.answers.get(q.key.as_str())) {
+            (Kind::ShortText | Kind::LongText, Some(v)) => clean_text(v, q.kind == Kind::LongText)
+                .chars()
+                .take(max)
+                .collect(),
+            _ => String::new(),
+        }
+    }
+}
+
 /// The questions as `book.html` renders them.
 pub(crate) fn form_context(form: &BookingForm) -> Vec<minijinja::Value> {
+    form_context_prefilled(form, &Prefill::default())
+}
+
+/// The questions as `book.html` renders them, text questions starting with
+/// the value the booking link gave them.
+pub(crate) fn form_context_prefilled(
+    form: &BookingForm,
+    prefill: &Prefill<'_>,
+) -> Vec<minijinja::Value> {
     form.questions
         .iter()
         .enumerate()
@@ -233,6 +291,7 @@ pub(crate) fn form_context(form: &BookingForm) -> Vec<minijinja::Value> {
                 .collect();
             context! {
                 name => field_name(&q.id),
+                value => prefill.answer(q),
                 html_id => format!("q{i}"),
                 kind => q.kind.as_str(),
                 label => q.label,

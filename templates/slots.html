@@ -1019,6 +1019,24 @@
   var basePath = decHtml("{{ base }}");
   var guestTz = decHtml("{{ guest_tz }}");
   var inviteToken = decHtml("{{ invite_token | default(value='') }}");
+  // Prefill values the booking link carried (name, email, notes,
+  // a_<question key>): every link to this event type's pages keeps them, so
+  // they reach the booking form whatever the guest clicks on the way.
+  (function () {
+    var keep = [];
+    new URLSearchParams(window.location.search).forEach(function (v, k) {
+      if (k === 'name' || k === 'email' || k === 'notes' || k.indexOf('a_') === 0) keep.push([k, v]);
+    });
+    if (!keep.length) return;
+    document.addEventListener('click', function (e) {
+      var a = e.target.closest && e.target.closest('a[href]');
+      if (!a) return;
+      var url = new URL(a.href, window.location.href);
+      if (url.origin !== window.location.origin || url.pathname.indexOf(basePath) !== 0) return;
+      keep.forEach(function (p) { if (!url.searchParams.has(p[0])) url.searchParams.set(p[0], p[1]); });
+      a.href = url.toString();
+    }, true);
+  })();
   var rescheduleBase = decHtml("{{ reschedule_base | default('') }}");
   // can_book is true when the viewer can actually book (public event, valid
   // booking invite, or rescheduling). When false, slot pills render as

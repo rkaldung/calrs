@@ -863,11 +863,11 @@ pub(super) async fn show_group_book_form(
             time_end => end_time,
             guest_tz => guest_tz_name,
             error => "",
-            form_name => invite_guest_name.as_deref().unwrap_or(""),
-            form_email => invite_guest_email.as_deref().unwrap_or(""),
-            form_notes => "",
+            form_name => invite_guest_name.as_deref().filter(|v| !v.is_empty()).unwrap_or(query.prefill().name),
+            form_email => invite_guest_email.as_deref().filter(|v| !v.is_empty()).unwrap_or(query.prefill().email),
+            form_notes => query.prefill().notes,
             notes_mode => booking_form.notes_mode,
-            questions => questions::form_context(&booking_form),
+            questions => questions::form_context_prefilled(&booking_form, &query.prefill()),
             invite_token => query.invite.as_deref().unwrap_or(""),
             sms_phone_mode => sms_phone_mode,
             phone_default_country => phone_default_country,
@@ -1420,11 +1420,11 @@ async fn show_dynamic_group_book_form(
             time_end => end_time,
             guest_tz => guest_tz_name,
             error => "",
-            form_name => "",
-            form_email => "",
-            form_notes => "",
+            form_name => query.prefill().name,
+            form_email => query.prefill().email,
+            form_notes => query.prefill().notes,
             notes_mode => booking_form.notes_mode,
-            questions => questions::form_context(&booking_form),
+            questions => questions::form_context_prefilled(&booking_form, &query.prefill()),
             invite_token => "",
             max_additional_guests => max_additional_guests,
             company_link => state.company_link.read().await.clone(),
@@ -1954,10 +1954,12 @@ pub(super) async fn show_book_form_for_user(
     let form_name = invite_guest_name
         .as_deref()
         .filter(|value| !value.is_empty())
+        .or(Some(query.prefill().name).filter(|value| !value.is_empty()))
         .unwrap_or(profile_name);
     let form_email = invite_guest_email
         .as_deref()
         .filter(|value| !value.is_empty())
+        .or(Some(query.prefill().email).filter(|value| !value.is_empty()))
         .unwrap_or(profile_email);
     let captcha = captcha::CaptchaVars::from_config(&*state.captcha_config.read().await);
     let rendered = tmpl
@@ -1985,9 +1987,9 @@ pub(super) async fn show_book_form_for_user(
             error => "",
             form_name => form_name,
             form_email => form_email,
-            form_notes => "",
+            form_notes => query.prefill().notes,
             notes_mode => booking_form.notes_mode,
-            questions => questions::form_context(&booking_form),
+            questions => questions::form_context_prefilled(&booking_form, &query.prefill()),
             invite_token => query.invite.as_deref().unwrap_or(""),
             max_additional_guests => max_additional_guests,
             company_link => state.company_link.read().await.clone(),
@@ -2409,9 +2411,17 @@ pub(super) struct BookQuery {
     time_format: Option<String>,
     #[serde(default)]
     fixed_tz: Option<String>,
+    /// Prefill values: `name`, `email`, `notes` and `a_<question key>`.
+    /// Anything else is ignored, as before.
+    #[serde(flatten)]
+    extra: HashMap<String, String>,
 }
 
 impl BookQuery {
+    fn prefill(&self) -> questions::Prefill<'_> {
+        questions::Prefill::from_query(&self.extra)
+    }
+
     fn embed_params(&self) -> EmbedParams {
         EmbedParams {
             embed: self.embed.clone(),
@@ -2545,11 +2555,11 @@ pub(super) async fn show_book_form(
             time_end => end_time,
             guest_tz => guest_tz_name,
             error => "",
-            form_name => "",
-            form_email => "",
-            form_notes => "",
+            form_name => query.prefill().name,
+            form_email => query.prefill().email,
+            form_notes => query.prefill().notes,
             notes_mode => booking_form.notes_mode,
-            questions => questions::form_context(&booking_form),
+            questions => questions::form_context_prefilled(&booking_form, &query.prefill()),
             form_phone => "",
             sms_phone_mode => sms_phone_mode,
             phone_default_country => phone_default_country,
