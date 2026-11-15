@@ -2201,3 +2201,82 @@ fn a_long_question_is_stacked_above_its_answer() {
     let row = &mail.html[mail.html[..at].rfind("<tr>").unwrap()..at];
     assert!(row.contains("white-space:nowrap"), "{row}");
 }
+
+fn title_answer(key: &str, value: &str) -> BookingAnswer {
+    BookingAnswer {
+        key: key.into(),
+        kind: "short_text".into(),
+        value: value.into(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn calendar_title_defaults_to_the_title_and_first_names() {
+    assert_eq!(
+        calendar_title(None, "Intro Call", "Jane Doe", "Alice Martin", &[]),
+        "Intro Call \u{2014} Jane & Alice"
+    );
+}
+
+#[test]
+fn calendar_title_fills_names_and_answers() {
+    let answers = [title_answer("ticketnummer", "2026111210000012")];
+    let title =
+        |t: &str| calendar_title(Some(t), "Support", "Jeanne de la Tour", "Roy K", &answers);
+    assert_eq!(
+        title("{title} [Ticket#{ticketnummer}]"),
+        "Support [Ticket#2026111210000012]"
+    );
+    assert_eq!(
+        title("{guest_last}, {guest_first} / {host_first} {host_last} / {guest} / {host}"),
+        "de la Tour, Jeanne / Roy K / Jeanne de la Tour / Roy K"
+    );
+}
+
+#[test]
+fn calendar_title_leaves_out_what_it_cannot_fill() {
+    // No answer, an unknown key and a one-word name give nothing; an
+    // unclosed brace stays; whitespace is collapsed.
+    assert_eq!(
+        calendar_title(
+            Some("{title}  {missing} {guest_last} x{y"),
+            "Support",
+            "Jeanne",
+            "Roy",
+            &[]
+        ),
+        "Support x{y"
+    );
+    // Built-in names win over a question with the same key.
+    let answers = [
+        title_answer("title", "other"),
+        title_answer("long", &"a".repeat(300)),
+    ];
+    assert_eq!(
+        calendar_title(Some("{title}"), "Support", "J", "R", &answers),
+        "Support"
+    );
+    assert_eq!(
+        calendar_title(Some("{long}"), "Support", "J", "R", &answers).len(),
+        100
+    );
+    // A title that comes out empty falls back to the event type title.
+    assert_eq!(
+        calendar_title(Some("{missing}"), "Support", "J", "R", &[]),
+        "Support"
+    );
+}
+
+#[test]
+fn calendar_title_answers_reach_the_ics_escaped() {
+    let answers = vec![title_answer("ticketnummer", "12;34, 5\nX")];
+    let summary = sanitize_ics(&calendar_title(
+        Some("{title} [{ticketnummer}]"),
+        "Support",
+        "Jane",
+        "Alice",
+        &answers,
+    ));
+    assert_eq!(summary, r"Support [12\;34\, 5 X]");
+}

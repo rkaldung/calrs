@@ -441,6 +441,88 @@ pub(super) fn first_name(full_name: &str) -> &str {
     full_name.split_whitespace().next().unwrap_or(full_name)
 }
 
+/// Environment variable holding the template of the calendar event title
+/// (the SUMMARY of every invite, cancellation and calendar copy).
+pub const CALENDAR_TITLE_ENV: &str = "CALRS_CALENDAR_TITLE";
+
+/// The title calrs has always written: `Intro call — Jeanne & Alice`.
+pub const DEFAULT_CALENDAR_TITLE: &str = "{title} \u{2014} {guest_first} & {host_first}";
+
+/// Longest text one answer placeholder puts into a title, in characters.
+const MAX_TITLE_ANSWER: usize = 100;
+
+fn calendar_title_template() -> Option<String> {
+    std::env::var(CALENDAR_TITLE_ENV)
+        .ok()
+        .filter(|t| !t.trim().is_empty())
+}
+
+/// The last name: everything after the first word ("" for a single word).
+fn last_name(full_name: &str) -> String {
+    full_name
+        .split_whitespace()
+        .skip(1)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Fill a calendar title template. Placeholders: `{title}` (event type
+/// title), `{guest}`, `{guest_first}`, `{guest_last}`, `{host}`,
+/// `{host_first}`, `{host_last}`, and `{<question key>}` for the guest's
+/// answer to that booking question (the built-in names win over a question
+/// with the same key). A placeholder with no value, such as an unanswered
+/// question, is left out; a `{` with no closing `}` is kept as written.
+/// Whitespace is collapsed, and a title that comes out empty falls back to
+/// the event type title.
+pub fn calendar_title(
+    template: Option<&str>,
+    title: &str,
+    guest_name: &str,
+    host_name: &str,
+    answers: &[BookingAnswer],
+) -> String {
+    let template = template.unwrap_or(DEFAULT_CALENDAR_TITLE);
+    let value = |name: &str| -> String {
+        match name {
+            "title" => title.to_string(),
+            "guest" => guest_name.to_string(),
+            "guest_first" => first_name(guest_name).to_string(),
+            "guest_last" => last_name(guest_name),
+            "host" => host_name.to_string(),
+            "host_first" => first_name(host_name).to_string(),
+            "host_last" => last_name(host_name),
+            key => answers
+                .iter()
+                .find(|a| a.key == key)
+                .map(|a| a.value.chars().take(MAX_TITLE_ANSWER).collect())
+                .unwrap_or_default(),
+        }
+    };
+    let mut out = String::new();
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find('}') {
+            Some(close) => {
+                out.push_str(&value(&after[..close]));
+                rest = &after[close + 1..];
+            }
+            None => {
+                out.push_str(&rest[open..]);
+                rest = "";
+            }
+        }
+    }
+    out.push_str(rest);
+    let out = out.split_whitespace().collect::<Vec<_>>().join(" ");
+    if out.is_empty() {
+        title.split_whitespace().collect::<Vec<_>>().join(" ")
+    } else {
+        out
+    }
+}
+
 pub fn generate_ics(details: &BookingDetails, method: &str) -> String {
     generate_ics_impl(details, method, false)
 }
@@ -460,11 +542,12 @@ fn generate_ics_impl(
     method: &str,
     schedule_agent_client: bool,
 ) -> String {
-    let guest_first = first_name(&details.guest_name);
-    let host_first = first_name(&details.host_name);
-    let summary = sanitize_ics(&format!(
-        "{} \u{2014} {} & {}",
-        details.event_title, guest_first, host_first
+    let summary = sanitize_ics(&calendar_title(
+        calendar_title_template().as_deref(),
+        &details.event_title,
+        &details.guest_name,
+        &details.host_name,
+        &details.answers,
     ));
     // CN= is a parameter, not a TEXT value: it needs quoting, not backslashes.
     let host_name = sanitize_ics_param(&details.host_name);
@@ -585,11 +668,12 @@ fn generate_ics_impl(
 
 /// Generate an .ics VCALENDAR for cancellation (METHOD:CANCEL)
 pub(super) fn generate_cancel_ics(details: &CancellationDetails) -> String {
-    let guest_first = first_name(&details.guest_name);
-    let host_first = first_name(&details.host_name);
-    let summary = sanitize_ics(&format!(
-        "{} \u{2014} {} & {}",
-        details.event_title, guest_first, host_first
+    let summary = sanitize_ics(&calendar_title(
+        calendar_title_template().as_deref(),
+        &details.event_title,
+        &details.guest_name,
+        &details.host_name,
+        &details.answers,
     ));
     // CN= is a parameter, not a TEXT value: it needs quoting, not backslashes.
     let host_name = sanitize_ics_param(&details.host_name);
