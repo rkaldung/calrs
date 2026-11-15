@@ -2,7 +2,7 @@ name: Publish Docker image
 
 on:
   push:
-    branches: [main]
+    branches: [main, url-prefill]
     tags: ["v*.*.*"]
 
 env:

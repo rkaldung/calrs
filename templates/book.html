@@ -260,9 +260,9 @@
     <div class="form-group">
       <label for="{{ q.html_id }}">{{ q.label }}{% if not q.required %} <span class="hint">{{ t("book-notes-optional") }}</span>{% endif %}</label>
       {% if q.kind == "long_text" %}
-      <textarea id="{{ q.html_id }}" name="{{ q.name }}" maxlength="{{ q.max_len }}"{% if q.required %} required{% endif %}{% if q.help %} aria-describedby="{{ help_id }}"{% endif %}></textarea>
+      <textarea id="{{ q.html_id }}" name="{{ q.name }}" maxlength="{{ q.max_len }}"{% if q.required %} required{% endif %}{% if q.help %} aria-describedby="{{ help_id }}"{% endif %}>{{ q.value }}</textarea>
       {% else %}
-      <input type="text" id="{{ q.html_id }}" name="{{ q.name }}" maxlength="{{ q.max_len }}"{% if q.required %} required{% endif %}{% if q.help %} aria-describedby="{{ help_id }}"{% endif %}>
+      <input type="text" id="{{ q.html_id }}" name="{{ q.name }}" maxlength="{{ q.max_len }}"{% if q.required %} required{% endif %}{% if q.help %} aria-describedby="{{ help_id }}"{% endif %} value="{{ q.value }}">
       {% endif %}
       {% if q.help %}<span class="q-help" id="{{ help_id }}">{{ q.help }}</span>{% endif %}
     </div>
