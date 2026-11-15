@@ -446,11 +446,28 @@ struct IcalDuration {
 ///
 /// Calendar days are applied before elapsed hours/minutes/seconds, in
 /// `zone`, the event's resolved timezone (`None` for floating and UTC
-/// times). Existing DTEND values are returned unchanged. An all-day event
-/// with neither lasts one day (RFC 5545 §3.6.1).
+/// times). An all-day event with neither lasts one day (RFC 5545 §3.6.1).
+///
+/// The end is stored beside the start and read in the start's zone, so a
+/// DTEND written in another zone is converted to it (#455); the DTEND TZID
+/// is resolved by its name here. Sync passes the zone its `VTIMEZONE`
+/// resolves to through [`extract_vevent_end_in`].
 pub fn extract_vevent_end(vevent: &str, zone: Option<Tz>) -> Option<String> {
+    let end_zone =
+        extract_vevent_tzid(vevent, "DTEND").and_then(|t| crate::tzid::resolve_or_offset(&t));
+    extract_vevent_end_in(vevent, zone, end_zone)
+}
+
+/// [`extract_vevent_end`] with the DTEND zone already resolved (`None` for a
+/// floating end, or a TZID nothing resolves).
+pub fn extract_vevent_end_in(
+    vevent: &str,
+    zone: Option<Tz>,
+    end_zone: Option<Tz>,
+) -> Option<String> {
     if let Some(end) = extract_vevent_field(vevent, "DTEND") {
-        return Some(end);
+        let start = extract_vevent_field(vevent, "DTSTART").unwrap_or_default();
+        return Some(end_in_start_zone(&start, end, zone, end_zone));
     }
 
     let start = extract_vevent_field(vevent, "DTSTART")?;
@@ -489,25 +506,10 @@ pub fn extract_vevent_end(vevent: &str, zone: Option<Tz>) -> Option<String> {
     let zone = zone.filter(|_| !start.ends_with('Z'));
     let end_dt = match zone {
         Some(tz) => {
-            use chrono::{Offset, TimeZone};
-
-            // Earliest selects the first occurrence of an ambiguous local
-            // time. A time skipped by a spring-forward change takes the
-            // offset from before the change (RFC 5545 §3.3.5).
-            let zoned = match tz.from_local_datetime(&after_days).earliest() {
-                Some(zoned) => zoned,
-                None => {
-                    let before = tz
-                        .from_local_datetime(&(after_days - chrono::Duration::hours(3)))
-                        .earliest()?
-                        .offset()
-                        .fix();
-                    tz.from_utc_datetime(&(after_days - before))
-                }
-            };
-
             // Elapsed-time addition respects any DST transition.
-            zoned.checked_add_signed(elapsed)?.naive_local()
+            localize(tz, after_days)?
+                .checked_add_signed(elapsed)?
+                .naive_local()
         }
         None => {
             // Floating time: no timezone conversion is possible.
@@ -527,6 +529,76 @@ pub fn extract_vevent_end(vevent: &str, zone: Option<Tz>) -> Option<String> {
     }
 
     Some(end)
+}
+
+/// `local` in `tz`. Earliest selects the first occurrence of an ambiguous
+/// local time. A time skipped by a spring-forward change takes the offset
+/// from before the change (RFC 5545 §3.3.5).
+fn localize(tz: Tz, local: NaiveDateTime) -> Option<chrono::DateTime<Tz>> {
+    use chrono::{Offset, TimeZone};
+
+    match tz.from_local_datetime(&local).earliest() {
+        Some(zoned) => Some(zoned),
+        None => {
+            let before = tz
+                .from_local_datetime(&(local - chrono::Duration::hours(3)))
+                .earliest()?
+                .offset()
+                .fix();
+            Some(tz.from_utc_datetime(&(local - before)))
+        }
+    }
+}
+
+/// A DTEND as the start's zone reads it (#455). `13:30 UTC` after a start
+/// in Zurich in November is `14:30`. A `Z` value is UTC whatever TZID sits
+/// beside it. Kept as written when both sides are in the same zone, when
+/// either has no zone calrs can convert from (floating, unresolved TZID),
+/// and for dates: there is no instant to convert then.
+fn end_in_start_zone(start: &str, end: String, zone: Option<Tz>, end_zone: Option<Tz>) -> String {
+    let utc_or = |value: &str, zone: Option<Tz>| {
+        if value.ends_with('Z') {
+            Some(Tz::UTC)
+        } else {
+            zone
+        }
+    };
+    let (Some(start_tz), Some(end_tz)) = (utc_or(start, zone), utc_or(&end, end_zone)) else {
+        return end;
+    };
+    if start_tz == end_tz || !start.contains('T') || !end.contains('T') {
+        return end;
+    }
+    let Some(instant) = parse_ical_datetime(&end).and_then(|local| localize(end_tz, local)) else {
+        return end;
+    };
+    let mut converted = instant.with_timezone(&start_tz).naive_local();
+    // Every reader takes a wall time repeated by a fall-back change as its
+    // first occurrence. An end on the second one would read an hour early,
+    // so it moves to the first wall time that reads at or after it: the
+    // event may block up to the end of the repeated hour, never less.
+    for _ in 0..24 * 60 {
+        if localize(start_tz, converted).is_some_and(|read| read >= instant) {
+            break;
+        }
+        // On whole minutes, so the end stops at the hour's boundary.
+        use chrono::Timelike;
+        converted = converted
+            .with_second(0)
+            .and_then(|t| t.with_nanosecond(0))
+            .unwrap_or(converted)
+            + chrono::Duration::minutes(1);
+    }
+    let format = if end.contains('-') {
+        "%Y-%m-%dT%H:%M:%S"
+    } else {
+        "%Y%m%dT%H%M%S"
+    };
+    let mut out = converted.format(format).to_string();
+    if start.ends_with('Z') {
+        out.push('Z');
+    }
+    out
 }
 
 /// A positive RFC 5545 duration (`PT1H30M`, `P1D`) as elapsed time, days
@@ -964,6 +1036,163 @@ END:VCALENDAR";
         assert_eq!(la(11), -8);
     }
 
+    /// tzdata 2026c to 2026f: zones that stopped changing clocks in 2026,
+    /// all in effect by 2026-11-01. tzdata 2026b gave each of them its old
+    /// winter offset, an hour off.
+    #[test]
+    fn tzdata_2026f_permanent_offsets() {
+        use chrono::{NaiveDate, Offset, TimeZone};
+        fn hours(zone: chrono_tz::Tz, y: i32, m: u32, d: u32) -> i32 {
+            let utc = NaiveDate::from_ymd_opt(y, m, d)
+                .unwrap()
+                .and_hms_opt(12, 0, 0)
+                .unwrap();
+            zone.offset_from_utc_datetime(&utc).fix().local_minus_utc() / 3600
+        }
+        use chrono_tz::{Africa, America};
+        // 2026c: Alberta permanent -06 (Yellowknife links to Edmonton).
+        assert_eq!(hours(America::Edmonton, 2026, 1, 15), -7);
+        assert_eq!(hours(America::Edmonton, 2026, 12, 15), -6);
+        assert_eq!(hours(America::Yellowknife, 2027, 1, 15), -6);
+        // 2026c: Morocco permanent +00 from 2026-09-20, Ramadan included.
+        assert_eq!(hours(Africa::Casablanca, 2026, 12, 15), 0);
+        assert_eq!(hours(Africa::Casablanca, 2027, 2, 15), 0);
+        assert_eq!(hours(Africa::Casablanca, 2027, 7, 15), 0);
+        // 2026d: Northwest Territories permanent -06.
+        assert_eq!(hours(America::Inuvik, 2026, 12, 15), -6);
+        // 2026e: Manitoba permanent -05.
+        assert_eq!(hours(America::Winnipeg, 2026, 1, 15), -6);
+        assert_eq!(hours(America::Winnipeg, 2026, 12, 15), -5);
+        // 2026f: Cuba stays on -04 through 2027-11-07.
+        assert_eq!(hours(America::Havana, 2026, 12, 15), -4);
+        assert_eq!(hours(America::Havana, 2027, 2, 15), -4);
+        // Neighbours keep their DST.
+        assert_eq!(hours(America::Denver, 2026, 12, 15), -7);
+        assert_eq!(hours(America::Chicago, 2026, 12, 15), -6);
+        assert_eq!(hours(America::Regina, 2026, 12, 15), -6);
+    }
+
+    /// 2026f writes Alaska's 1867 switch from Asian to American LMT in UT
+    /// (`0:31:13u`), a suffix chrono-tz 0.8.6's parser ignores on an UNTIL
+    /// time; the vendored file keeps it in local time. Juneau was +15:02:19
+    /// until then, -08:57:41 after.
+    #[test]
+    fn tzdata_alaska_1867_switch_at_the_right_instant() {
+        use chrono::{NaiveDate, Offset, TimeZone};
+        let offset = |h, m, s| {
+            let utc = NaiveDate::from_ymd_opt(1867, 10, 19)
+                .unwrap()
+                .and_hms_opt(h, m, s)
+                .unwrap();
+            chrono_tz::America::Juneau
+                .offset_from_utc_datetime(&utc)
+                .fix()
+                .local_minus_utc()
+        };
+        assert_eq!(offset(0, 31, 12), 15 * 3600 + 2 * 60 + 19);
+        assert_eq!(offset(0, 31, 13), -(8 * 3600 + 57 * 60 + 41));
+    }
+
+    /// 2026e ends Ireland's 1925 summer time on 09-20 at 02:00 GMT, written
+    /// `2:00s`, a suffix the vendored parser ignores on an UNTIL time; the
+    /// vendored file writes it as 03:00 IST wall time.
+    #[test]
+    fn tzdata_dublin_1925_fall_back_at_two_gmt() {
+        use chrono::{NaiveDate, Offset, TimeZone};
+        let offset = |h, m| {
+            let utc = NaiveDate::from_ymd_opt(1925, 9, 20)
+                .unwrap()
+                .and_hms_opt(h, m, 0)
+                .unwrap();
+            chrono_tz::Europe::Dublin
+                .offset_from_utc_datetime(&utc)
+                .fix()
+                .local_minus_utc()
+        };
+        assert_eq!(offset(1, 59), 3600);
+        assert_eq!(offset(2, 0), 0);
+    }
+
+    /// Every zone's offsets at every transition from 1800 to 2040, and on the
+    /// 15th of every month from 1900 to 2040, against zic's reading of the
+    /// same tzdata (`vendor/chrono-tz/crosscheck.py` writes them). Run on a
+    /// refresh, see `vendor/chrono-tz/CALRS.md`:
+    /// `TZ_EXPECT=<file> cargo test tzdata_matches_zdump -- --ignored`.
+    /// Fails on any disagreement that is not in the baseline, which lists
+    /// each known one by zone and instant; prints the new ones as baseline
+    /// lines, and the baseline lines that agree now.
+    #[test]
+    #[ignore]
+    fn tzdata_matches_zdump() {
+        use chrono::{Offset, TimeZone};
+        use std::collections::BTreeSet;
+        let expect = std::env::var("TZ_EXPECT").expect("TZ_EXPECT=<crosscheck.py output>");
+        let baseline: BTreeSet<(String, i64)> = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/vendor/chrono-tz/crosscheck-baseline.txt"
+        ))
+        .unwrap()
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .map(|l| {
+            let (zone, at) = l.split_once('\t').expect("zone<TAB>unix time");
+            (zone.to_string(), at.parse().unwrap())
+        })
+        .collect();
+        let (mut checked, mut differ, mut unknown) = (0, BTreeSet::new(), BTreeSet::new());
+        let (mut zones, mut end) = (BTreeSet::new(), None);
+        for line in std::fs::read_to_string(expect).unwrap().lines() {
+            if let Some(record) = line.strip_prefix("#end\t") {
+                let (z, n) = record.split_once('\t').unwrap();
+                end = Some((z.parse::<usize>().unwrap(), n.parse::<usize>().unwrap()));
+                continue;
+            }
+            assert!(end.is_none(), "rows after the #end record");
+            let mut fields = line.split('\t');
+            let (zone, at, offset) = (
+                fields.next().unwrap(),
+                fields.next().unwrap().parse::<i64>().unwrap(),
+                fields.next().unwrap().parse::<i32>().unwrap(),
+            );
+            zones.insert(zone.to_string());
+            let Ok(tz) = zone.parse::<chrono_tz::Tz>() else {
+                unknown.insert(zone.to_string());
+                continue;
+            };
+            let utc = chrono::DateTime::from_timestamp(at, 0).unwrap().naive_utc();
+            checked += 1;
+            if tz.offset_from_utc_datetime(&utc).fix().local_minus_utc() != offset {
+                differ.insert((zone.to_string(), at));
+            }
+        }
+        // An empty or truncated file must not pass as "nothing differs": the
+        // script ends with the zone and row counts it wrote.
+        let (end_zones, end_rows) = end.expect("no #end record: the file is truncated");
+        assert!(unknown.is_empty(), "zones chrono-tz lacks: {unknown:?}");
+        assert_eq!(
+            (zones.len(), checked),
+            (end_zones, end_rows),
+            "zones and rows read vs written"
+        );
+        let new: Vec<_> = differ.difference(&baseline).collect();
+        let fixed: Vec<_> = baseline.difference(&differ).collect();
+        println!(
+            "{checked} offsets checked, {} known differences",
+            differ.len() - new.len()
+        );
+        for (zone, at) in &fixed {
+            println!("agrees now, drop from the baseline: {zone}\t{at}");
+        }
+        for (zone, at) in &new {
+            println!("NEW\t{zone}\t{at}");
+        }
+        assert!(
+            new.is_empty(),
+            "{} offsets differ outside the baseline",
+            new.len()
+        );
+    }
+
     /// The vendored data is in rearguard form: numeric abbreviations are
     /// spelled out, not the main form's literal `%z`.
     #[test]
@@ -1334,6 +1563,132 @@ DTEND:20261027T171500Z
 END:VEVENT";
 
         assert_eq!(end_of(event), Some("20261027T171500Z".to_string()),);
+    }
+
+    /// DTEND in another zone than DTSTART. The stored end is read in the
+    /// DTSTART zone, so it must be converted to it: 13:30 UTC is 14:30 in
+    /// Zurich in November, and the event lasts one hour, not zero.
+    #[test]
+    fn normalizes_dtend_to_the_dtstart_zone() {
+        let cases = [
+            // TZID on both, different zones.
+            (
+                "DTSTART;TZID=Europe/Zurich:20261118T133000",
+                "DTEND;TZID=Etc/UTC:20261118T133000",
+                "20261118T143000",
+            ),
+            // UTC end written with the Z suffix.
+            (
+                "DTSTART;TZID=Europe/Zurich:20261118T133000",
+                "DTEND:20261118T133000Z",
+                "20261118T143000",
+            ),
+            // Two named zones, neither UTC.
+            (
+                "DTSTART;TZID=Europe/Zurich:20261118T133000",
+                "DTEND;TZID=Europe/London:20261118T133000",
+                "20261118T143000",
+            ),
+            // Overnight across the fall-back change (01:00 UTC on Oct 25):
+            // 02:00 UTC is 03:00 in Zurich (+01:00), not 04:00 with the
+            // +02:00 offset the start had.
+            (
+                "DTSTART;TZID=Europe/Zurich:20261024T230000",
+                "DTEND:20261025T020000Z",
+                "20261025T030000",
+            ),
+            // UTC start, zoned end: the end is stored in UTC like the start.
+            (
+                "DTSTART:20261118T123000Z",
+                "DTEND;TZID=Europe/Zurich:20261118T143000",
+                "20261118T133000Z",
+            ),
+            // Same zone on both: stays as written.
+            (
+                "DTSTART;TZID=Europe/Zurich:20261118T133000",
+                "DTEND;TZID=Europe/Zurich:20261118T143000",
+                "20261118T143000",
+            ),
+        ];
+
+        for (start, end, expected) in cases {
+            let event = format!("BEGIN:VEVENT\n{start}\n{end}\nEND:VEVENT");
+
+            assert_eq!(end_of(&event), Some(expected.to_string()), "{start}, {end}");
+        }
+    }
+
+    /// An end converted into the hour a fall-back change repeats: readers
+    /// take that wall time as its first occurrence, so the second one is
+    /// stored as the end of the repeated hour, never as an earlier instant.
+    /// New York falls back at 06:00 UTC on 2026-11-01.
+    #[test]
+    fn an_end_in_the_repeated_hour_is_never_read_early() {
+        let cases = [
+            // 05:30 UTC is 01:30 EDT, the first 01:30: kept.
+            ("DTEND:20261101T053000Z", "20261101T013000"),
+            // 06:30 UTC is 01:30 EST, the second 01:30: read as 02:00 EST.
+            ("DTEND:20261101T063000Z", "20261101T020000"),
+            // With seconds: still the end of the repeated hour, not 02:00:30.
+            ("DTEND:20261101T063030Z", "20261101T020000"),
+            // 07:30 UTC is 02:30 EST, after the change: kept.
+            ("DTEND:20261101T073000Z", "20261101T023000"),
+        ];
+        let ny = chrono_tz::America::New_York;
+        for (end, expected) in cases {
+            let event = format!(
+                "BEGIN:VEVENT\nDTSTART;TZID=America/New_York:20261101T003000\n{end}\nEND:VEVENT"
+            );
+            let stored = end_of(&event).unwrap();
+            assert_eq!(stored, expected, "{end}");
+
+            // What a busy reader makes of it, in UTC: never before the end.
+            let wanted = parse_ical_datetime(end.strip_prefix("DTEND:").unwrap()).unwrap();
+            let read = convert_event_to_tz(
+                parse_ical_datetime(&stored).unwrap(),
+                Some(ny.name()),
+                Tz::UTC,
+            );
+            assert!(read >= wanted, "{end}: read as {read}");
+        }
+    }
+
+    /// When either side has no zone calrs can convert from, there is no
+    /// instant to normalize, so DTEND is kept as written.
+    #[test]
+    fn keeps_dtend_as_written_when_a_zone_does_not_resolve() {
+        let cases = [
+            // DTEND TZID unknown, and no VTIMEZONE at hand.
+            (
+                "DTSTART;TZID=Europe/Zurich:20261118T133000",
+                "DTEND;TZID=Nowhere/Special:20261118T143000",
+                "20261118T143000",
+            ),
+            // DTSTART TZID unknown: the start is read as floating time.
+            (
+                "DTSTART;TZID=Nowhere/Special:20261118T133000",
+                "DTEND;TZID=Etc/UTC:20261118T143000",
+                "20261118T143000",
+            ),
+            // Floating start, zoned end (invalid per RFC 5545 3.8.2.2).
+            (
+                "DTSTART:20261118T133000",
+                "DTEND;TZID=Etc/UTC:20261118T143000",
+                "20261118T143000",
+            ),
+            // Floating start, UTC end (equally invalid).
+            (
+                "DTSTART:20261118T133000",
+                "DTEND:20261118T143000Z",
+                "20261118T143000Z",
+            ),
+        ];
+
+        for (start, end, expected) in cases {
+            let event = format!("BEGIN:VEVENT\n{start}\n{end}\nEND:VEVENT");
+
+            assert_eq!(end_of(&event), Some(expected.to_string()), "{start}, {end}");
+        }
     }
 
     #[test]

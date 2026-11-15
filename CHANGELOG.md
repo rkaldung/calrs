@@ -204,6 +204,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/), and this
 
 ## [Unreleased]
 
+## [2.0.0-rc.3] - 2026-11-15
+
+Third release candidate of 2.0, with fixes from RC feedback. **Upgrade from rc.2** if you use private team invite links (the team page showed an error since beta.4), or if calendar events written by Thunderbird or Outlook can end in another timezone than they start (they could block nothing). **No migrations since rc.2.**
+
+Docker: this version is published as `:2.0.0-rc.3` and `:next`. `:latest` stays on the 1.23 line (1.23.4) until 2.0 is final.
+
+### Changed
+
+- **Troubleshoot timeline colours** (#453) - Available time is green and calendar events are red, where both were low-contrast greys. Thanks @threema-danilo.
+
+### Fixed
+
+- **An event whose end is written in another timezone than its start blocked the wrong time** (#455) - calrs stores one timezone per event, the start's, and read the end in it as written. Thunderbird can save an event from 13:30 in Zurich to 13:30 UTC: one hour, which calrs read as zero minutes, so it blocked nothing. The end is now converted to the start's timezone when a calendar or a resource feed is synced, including an end timezone that only its `VTIMEZONE` defines (Outlook's "Customized Time Zone"). An end that lands in the hour a fall-back change repeats is never read earlier than it is. Calendar events already synced are read again by the daily full resync, or at once with `calrs sync --full`; a resource feed is read whole at each refresh, so its events are corrected the next time it is used. Thanks @threema-danilo for the report and the regression tests.
+- **A private team's page opened with its invite link showed an error** (#449) - Since 2.0.0-beta.4 the team page writes its invite into its meeting links with minijinja's `urlencode` filter, which needs a feature calrs did not enable: `/team/{slug}?invite=...` answered the internal error page instead of the team. Fixed by @Frankkkkk; a test now opens that page with an invite.
+- **A past booking from before UTC times is no longer checked as if upcoming** (#447) - When a booking's event leaves the synced calendar window, calrs leaves a meeting that is already over alone, so a host clearing old events never sends a guest a cancellation. Bookings made before booking times were stored in UTC keep a wall-clock time, which that check could not read: every sync took each such past booking for an upcoming one whose event had vanished, asked the calendar server whether it still existed, and logged "skipping booking cancellation". Had the host deleted the old event, calrs would have cancelled a meeting held months before and emailed the guest. The check now reads those times in their event's timezone. Reported from the Vates production logs.
+
+### Documentation
+
+- **"Suggest an edit" opens the right page** (#444) - Every docs page linked its edit button to a path that does not exist since the site moved to mdbook 0.5. Fixed by @AymericFerreira; the published site already has it.
+
+## [2.0.0-rc.2] - 2026-11-13
+
+Second release candidate of 2.0, with one change: the bundled timezone data. calrs carried IANA tzdata 2026b, and four releases since then move zones to permanent offsets, most of them already in effect, so times in Alberta, the Northwest Territories, Manitoba, Morocco and Cuba were an hour off. **Upgrade from rc.1** if you, your guests or your calendar events use one of those zones. Synced calendar events are read correctly again as soon as you upgrade; bookings and time off saved while the data was stale keep the instant they were saved with, so check those made in these zones since the change. CI now fails while the bundled data is older than IANA's latest, so this cannot go stale silently again. The same data ships for the 1.23 line as 1.23.4. **No migrations since rc.1.**
+
+Docker: this version is published as `:2.0.0-rc.2` and `:next`. `:latest` stays on the 1.23 line (now 1.23.4) until 2.0 is final.
+
+### Fixed
+
+- **Timezone data updated to IANA 2026f** (#285) - calrs bundled tzdata 2026b, and four releases since then move zones to permanent offsets, most already in effect: Morocco +00 from 2026-09-20, Manitoba (`America/Winnipeg`) -05 from 2026-10-31, Alberta (`America/Edmonton`) and the Northwest Territories -06 from 2026-11-01, and Cuba staying on -04 until 2027-11-07. For hosts, guests or calendar events in those zones, every time (slots, busy times, emails, invites) was an hour off. Tests pin each change. Bookings and time off saved while the data was stale keep the instant they were saved with.
+
+### Internal
+
+- **CI fails when the bundled tz data is stale** (#285) - `scripts/check-tzdata.sh` compares `vendor/chrono-tz/tz` with IANA's latest release. CI runs it on every push and pull request, and a daily workflow opens an issue when IANA publishes, so a new release is noticed before a zone's clocks change.
+- **A cross-check of the bundled tz data against IANA's tools** (#285) - `vendor/chrono-tz/crosscheck.py` and the opt-in test `tzdata_matches_zdump` compare what calrs reads with `zic`/`zdump` for every zone, at each transition from 1800 and monthly to 2040. It caught two regressions in the new data before release, where the parser calrs builds with ignores a time suffix (Alaska's 1867 changeover, Dublin's 1925 return to GMT); the vendored copy writes both in wall time.
+
 ## [2.0.0-rc.1] - 2026-11-12
 
 First release candidate of 2.0. Nothing new since beta.4 but a language: this candidate is about correctness. A review of beta.4 found four bugs in the booking checks: calendar events stored in another timezone than the host's could be missed by round robin and approvals (#420), a guest reschedule waiting behind another booking could bring a cancelled booking back (#421), a booking's buffers did not hold against later bookings, at approval or across a clock change (#422), and `calrs booking create` ignored date overrides (#423). From the beta testers: an SSO login refused on purpose now says why instead of failing with a 500, and an identity provider that keeps its ID token minimal can now sign users in (#264). calrs now speaks Russian (#419), and the deployment guide lists which paths a reverse proxy can keep private. **No migrations since beta.4**, so upgrading from it changes no data. Coming from 1.23 or an earlier beta, read the upgrade notes of each 2.0 pre-release below, and back up your database first.
@@ -452,6 +487,18 @@ Please report what looks wrong, reads badly in your language, or is slow on your
 
 - Migration 080 adds `users.last_login_at`, filled from the sessions each user still has, then stamped at each completed sign-in (after the MFA code when MFA applies).
 - Migration 081 only adds and replaces indexes. On a large database it takes a few seconds at the first start.
+
+## [1.23.4] - 2026-11-13
+
+Timezone data release for the 1.23 line. **Upgrade now** if you, your guests or your calendar events use Alberta, the Northwest Territories, Manitoba, Morocco or Cuba time: the bundled data dated from 2026b, and those zones changed their rules since, most of them already in effect. No migrations, nothing else changes.
+
+### Fixed
+
+- **Timezone data updated to IANA 2026f** (#285, #441) - Four tz releases since 2026b move zones to permanent offsets: Morocco +00 from 2026-09-20, Manitoba (`America/Winnipeg`) -05 from 2026-10-31, Alberta (`America/Edmonton`) and the Northwest Territories -06 from 2026-11-01, and Cuba staying on -04 until 2027-11-07. calrs put every time in those zones an hour off (slots, busy times, emails, invites). Synced calendar events are read correctly again as soon as you upgrade, since they keep their own timezone. Bookings and time off saved while the data was stale keep the instant they were saved with: if hosts or guests in these zones booked since the change, check those bookings' times.
+
+### Internal
+
+- **CI fails when the bundled tz data is stale** (#285) - `scripts/check-tzdata.sh` compares `vendor/chrono-tz/tz` with IANA's latest release on every push and pull request.
 
 ## [1.23.3] - 2026-11-09
 
