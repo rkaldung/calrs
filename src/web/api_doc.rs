@@ -59,6 +59,7 @@ Each operation names the scope it needs. By default only administrators may use 
         api::get_booking,
         api::cancel_booking_api,
         api::request_reschedule_api,
+        api::create_invite,
         openapi_json,
     ),
     components(schemas(api::ErrorBody, api::ErrorCode, api::BookingRef)),
@@ -66,6 +67,7 @@ Each operation names the scope it needs. By default only administrators may use 
         (name = "event-types", description = "The event types you manage, and the internal ones the booking directory offers you."),
         (name = "slots", description = "Bookable times, computed by the booking page's own engine."),
         (name = "bookings", description = "The bookings you host, and booking, cancelling or rescheduling on a guest's behalf."),
+        (name = "invites", description = "Single-use booking links for the event types you may distribute."),
         (name = "meta", description = "This document."),
     ),
     modifiers(&CommonAnswers),
@@ -90,7 +92,7 @@ fn oauth2_scheme(base: &str) -> SecurityScheme {
         "List and read your event types.",
         "Read the bookable times of the event types you manage.",
         "Read the bookings you host, guest details included.",
-        "Book, cancel and request a reschedule for a guest.",
+        "Book, cancel and request a reschedule for a guest; create invite links.",
     ];
     let scopes = Scopes::from_iter(crate::oauth::API_SCOPES.into_iter().zip(descriptions));
     let mut code = AuthorizationCode::new(

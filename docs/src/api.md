@@ -107,7 +107,7 @@ with their permissions, and are revoked there.
 | `event-types:read` | `GET /event-types`, `GET /event-types/{id}` |
 | `slots:read` | `GET /event-types/{id}/slots` |
 | `bookings:read` | `GET /bookings`, `GET /bookings/{id}` |
-| `bookings:write` | `POST /bookings`, `POST /bookings/{id}/cancel`, `POST /bookings/{id}/request-reschedule` |
+| `bookings:write` | `POST /bookings`, `POST /bookings/{id}/cancel`, `POST /bookings/{id}/request-reschedule`, `POST /invites` |
 
 A missing scope answers 403 with `insufficient_scope`, and a
 `WWW-Authenticate` header naming the scope needed.
@@ -129,6 +129,9 @@ more than any other user: like MCP, there is no global admin bypass.
   the event type. Another host gets 403 when the token can read bookings; a
   token with `bookings:write` alone gets the same 404 as for a booking that
   does not exist.
+- **Invite links**: as on the dashboard and through MCP, any internal event
+  type the booking directory offers you, and the private and public ones you
+  manage.
 
 Anything else answers 404, whether it exists or not.
 
@@ -456,6 +459,40 @@ so no second link is made. To remind the guest, send `{"resend": true}`: the
 same request is emailed again, with the same link, at most once an hour (409
 `resend_too_soon`; 409 `no_reschedule_pending` when none is waiting). The
 dashboard has the same **Resend request** button.
+
+### `POST /api/v1/invites`
+
+Body:
+
+```json
+{"username": "alice", "slug": "intro", "expires_days": 14,
+ "guest_name": "Jeanne Martin", "guest_email": "jeanne@example.com"}
+```
+
+A booking link for the event type at `/u/alice/intro`; for a team event type,
+give `"team": "<team slug>"` instead of `username`. The page is named rather
+than an id, so an integration that knows who handles a customer (initials,
+login names) and which meeting it offers needs no lookup first.
+
+For an internal or private event type it creates what the dashboard's **Get
+link** and the MCP `create_invite_link` tool create: an invite for one
+booking, answered with 201. `expires_days` is 7 (the default), 14, 30, or 0
+for never (400 `invalid_expiry` otherwise). `guest_name` and `guest_email` are
+optional; when given they are stored with the invite and fill in the booking
+form. Nothing is emailed: send the link yourself.
+
+```json
+{"url": "https://cal.example.com/u/alice/intro?invite=…",
+ "event_type_id": "…", "expires_at": "2026-12-01T09:30:00Z", "max_uses": 1}
+```
+
+A public event type answers 200 with its reusable page (`expires_at` and
+`max_uses` null) and stores nothing, the guest included.
+
+Internal event types are open to every user, so one account (a service user
+for a ticket system, say) can make links for everyone's internal types.
+Private and public ones need their owner or a team admin. An event type you
+may not distribute, a disabled one, or none at that page answers 404.
 
 ## Example
 
