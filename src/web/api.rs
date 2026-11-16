@@ -48,6 +48,7 @@ pub(super) fn router() -> Router<Arc<AppState>> {
                 .layer(DefaultBodyLimit::max(BOOKING_BODY_LIMIT)),
         )
         .route("/bookings/{id}", get(get_booking))
+        .route("/invites", post(create_invite))
         .route("/bookings/{id}/cancel", post(cancel_booking_api))
         .route(
             "/bookings/{id}/request-reschedule",
@@ -102,6 +103,7 @@ pub(super) enum ErrorCode {
     IdempotencyKeyReused,
     RateLimited,
     DailyLimitReached,
+    InvalidExpiry,
     InternalError,
 }
 
@@ -2439,4 +2441,193 @@ async fn idempotency_finish(
         tracing::error!(error = %e, "API idempotency record failed");
     }
     (status, value)
+}
+
+// --- Invites ---
+
+/// Which event type an invite is for, and who it is for.
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub(super) struct InviteBody {
+    /// The owner's username, for a personal event type (`/u/{username}/{slug}`).
+    /// Give this or `team`.
+    #[schema(max_length = 255)]
+    username: Option<String>,
+    /// The team's slug, for a team event type (`/team/{team}/{slug}`).
+    /// Give this or `username`.
+    #[schema(max_length = 255)]
+    team: Option<String>,
+    /// The event type's slug.
+    #[schema(max_length = 255)]
+    slug: String,
+    /// Days until the invite expires: 7, 14 or 30, or 0 for never. Default 7.
+    #[schema(minimum = 0, maximum = 30)]
+    expires_days: Option<i32>,
+    /// The guest's name, filled into the booking form.
+    #[schema(max_length = 255)]
+    guest_name: Option<String>,
+    /// The guest's email address, filled into the booking form.
+    #[schema(max_length = 255)]
+    guest_email: Option<String>,
+}
+
+/// A booking link.
+#[derive(Serialize, ToSchema)]
+pub(super) struct InviteAnswer {
+    /// The link to send: the booking page with the invite's token, or the
+    /// reusable page of a public event type.
+    url: String,
+    /// The event type's id.
+    event_type_id: String,
+    /// UTC, RFC 3339; `null` when the invite never expires or the link is a
+    /// public page.
+    expires_at: Option<String>,
+    /// 1 for an invite (one booking); `null` for a public page.
+    max_uses: Option<i32>,
+}
+
+/// The id of the event type at `/u/{username}/{slug}` or
+/// `/team/{team}/{slug}`, enabled or not.
+async fn event_type_by_path(
+    pool: &SqlitePool,
+    username: Option<&str>,
+    team: Option<&str>,
+    slug: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    match (username, team) {
+        (Some(username), None) => {
+            sqlx::query_scalar(
+                "SELECT et.id FROM event_types et
+                 JOIN accounts a ON a.id = et.account_id
+                 JOIN users u ON u.id = a.user_id
+                 WHERE u.username = ? AND et.slug = ? AND et.team_id IS NULL",
+            )
+            .bind(username)
+            .bind(slug)
+            .fetch_optional(pool)
+            .await
+        }
+        (None, Some(team)) => {
+            sqlx::query_scalar(
+                "SELECT et.id FROM event_types et JOIN teams t ON t.id = et.team_id
+                 WHERE t.slug = ? AND et.slug = ?",
+            )
+            .bind(team)
+            .bind(slug)
+            .fetch_optional(pool)
+            .await
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Create an invite link
+///
+/// A booking link for an event type named by its page: the owner's username
+/// (or the team's slug) and its slug, as in `/u/alice/intro`. For an
+/// internal or private event type this creates a single-use invite, the same
+/// as the dashboard's "Get link" and the MCP `create_invite_link` tool, with
+/// the guest's name and email stored to fill in the booking form; nothing is
+/// emailed. A public event type answers its reusable page instead and
+/// stores nothing. Internal event types are open to every user; private and
+/// public ones only to their owner or a team admin (instance admins get no
+/// bypass). Scope: `bookings:write`.
+#[utoipa::path(
+    post,
+    path = "/invites",
+    tag = "invites",
+    operation_id = "createInvite",
+    request_body(content = InviteBody, content_type = "application/json"),
+    responses(
+        (status = 201, description = "A new invite: one booking, expiring as asked.", body = InviteAnswer),
+        (status = 200, description = "A public event type: its reusable page; nothing was created.", body = InviteAnswer),
+        (status = 400, description = "`invalid_request`: neither or both of `username` and `team`, or an invalid guest name or email. `invalid_expiry`: `expires_days` other than 0, 7, 14 or 30. `invalid_json`."),
+        (status = 404, description = "`not_found`: no such event type, a disabled one, or one you may not distribute."),
+        (status = 413, description = "`payload_too_large`."),
+        (status = 415, description = "`unsupported_media_type`: the body is not `application/json`."),
+    ),
+    security(("oauth2" = ["bookings:write"]), ("personalAccessToken" = ["bookings:write"])),
+)]
+pub(super) async fn create_invite(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: BodyBytes,
+) -> ApiResult {
+    let caller = authenticate(&state, &headers, "bookings:write").await?;
+    heavy_limit(&state, &caller).await?;
+    let body = body_bytes(body, BODY_LIMIT)?;
+    let request: InviteBody = json_body(&headers, &body, false)?;
+    let expires_days = request.expires_days.unwrap_or(7);
+    if ![0, 7, 14, 30].contains(&expires_days) {
+        return Err(ApiError::bad(
+            ErrorCode::InvalidExpiry,
+            "expires_days must be 0 (never), 7, 14 or 30.",
+        ));
+    }
+    if request.username.is_some() == request.team.is_some() {
+        return Err(ApiError::bad(
+            ErrorCode::InvalidRequest,
+            "Give either username or team.",
+        ));
+    }
+    let name = request.guest_name.as_deref().unwrap_or("").trim();
+    let email = request.guest_email.as_deref().unwrap_or("").trim();
+    if name.len() > 255 || name.chars().any(char::is_control) {
+        return Err(ApiError::bad(
+            ErrorCode::InvalidRequest,
+            en("validate-name-length"),
+        ));
+    }
+    if !email.is_empty() {
+        super::booking::validate_booking_input("guest", email, &None)
+            .map_err(|key| ApiError::bad(ErrorCode::InvalidRequest, en(key)))?;
+    }
+    let too_long = |v: &Option<String>| v.as_ref().is_some_and(|v| v.len() > 255);
+    if too_long(&request.username) || too_long(&request.team) || request.slug.len() > 255 {
+        return Err(ApiError::not_found());
+    }
+    let Some(et_id) = event_type_by_path(
+        &state.pool,
+        request.username.as_deref(),
+        request.team.as_deref(),
+        &request.slug,
+    )
+    .await?
+    else {
+        return Err(ApiError::not_found());
+    };
+    let outcome = super::invites::create_quick_invite(
+        &state.pool,
+        &caller.user,
+        &et_id,
+        true,
+        expires_days,
+        (name, email),
+    )
+    .await?;
+    let super::invites::QuickInviteOutcome::Created(invite) = outcome else {
+        return Err(ApiError::not_found());
+    };
+    let url = if invite.url.starts_with('/') {
+        format!("{}{}", crate::oauth::issuer(), invite.url)
+    } else {
+        invite.url
+    };
+    let created = invite.max_uses.is_some();
+    if created {
+        tracing::info!(event_type = %et_id, credential = %caller.credential, "invite created through the API");
+    }
+    Ok(ok(
+        if created {
+            StatusCode::CREATED
+        } else {
+            StatusCode::OK
+        },
+        to_json(&InviteAnswer {
+            url,
+            event_type_id: et_id,
+            expires_at: invite.expires_at.map(|v| v.replace(' ', "T") + "Z"),
+            max_uses: invite.max_uses,
+        }),
+    ))
 }

@@ -647,7 +647,16 @@ pub(super) async fn generate_quick_link(
         return resp;
     }
 
-    match create_quick_invite(&state.pool, &auth_user.user, &event_type_id, false, 7).await {
+    match create_quick_invite(
+        &state.pool,
+        &auth_user.user,
+        &event_type_id,
+        false,
+        7,
+        ("", ""),
+    )
+    .await
+    {
         Ok(QuickInviteOutcome::Created(invite)) => {
             axum::Json(serde_json::json!({ "url": invite.url })).into_response()
         }
@@ -675,16 +684,20 @@ pub(super) enum QuickInviteOutcome {
     Unavailable,
 }
 
-/// Shared by the dashboard and MCP. Internal events are distributable by any
-/// user; other event types require management permission. No email is sent.
-/// `integration` (MCP) also returns the reusable URL of a public type, and
-/// only for enabled types, as `list_event_types` lists them.
+/// Shared by the dashboard, MCP and the REST API. Internal events are
+/// distributable by any user; other event types require management
+/// permission. No email is sent. `integration` (MCP, REST API) also returns
+/// the reusable URL of a public type, and only for enabled types, as
+/// `list_event_types` lists them. `guest` (name, email) is stored with the
+/// invite and fills the booking form; empty for a quick link. A public type
+/// stores nothing, so it is ignored there.
 pub(super) async fn create_quick_invite(
     pool: &SqlitePool,
     user: &crate::models::User,
     event_type_id: &str,
     integration: bool,
     expires_days: i32,
+    guest: (&str, &str),
 ) -> Result<QuickInviteOutcome, sqlx::Error> {
     let et: Option<(
         String,
@@ -774,11 +787,13 @@ pub(super) async fn create_quick_invite(
 
     sqlx::query(
         "INSERT INTO booking_invites (id, event_type_id, token, guest_name, guest_email, expires_at, max_uses, created_by_user_id)
-         VALUES (?, ?, ?, '', '', ?, 1, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
     )
     .bind(uuid::Uuid::new_v4().to_string())
     .bind(&et_id)
     .bind(&token)
+    .bind(guest.0)
+    .bind(guest.1)
     .bind(&expires_at)
     .bind(&user.id)
     .execute(pool)

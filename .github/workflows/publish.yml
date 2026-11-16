@@ -2,7 +2,7 @@ name: Publish Docker image
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature-api-invite]
     tags: ["v*.*.*"]
 
 env:
